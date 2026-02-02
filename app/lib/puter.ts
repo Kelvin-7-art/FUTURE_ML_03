@@ -10,10 +10,7 @@ declare global {
         signOut: () => Promise<void>;
       };
       fs: {
-        write: (
-          path: string,
-          data: string | File | Blob
-        ) => Promise<File | undefined>;
+        write: (path: string, data: string | File | Blob) => Promise<File | undefined>;
         read: (path: string) => Promise<Blob>;
         upload: (file: File[] | Blob[]) => Promise<FSItem>;
         delete: (path: string) => Promise<void>;
@@ -26,10 +23,7 @@ declare global {
           testMode?: boolean,
           options?: PuterChatOptions
         ) => Promise<Object>;
-        img2txt: (
-          image: string | File | Blob,
-          testMode?: boolean
-        ) => Promise<string>;
+        img2txt: (image: string | File | Blob, testMode?: boolean) => Promise<string>;
       };
       kv: {
         get: (key: string) => Promise<string | null>;
@@ -46,6 +40,7 @@ interface PuterStore {
   isLoading: boolean;
   error: string | null;
   puterReady: boolean;
+
   auth: {
     user: PuterUser | null;
     isAuthenticated: boolean;
@@ -55,16 +50,15 @@ interface PuterStore {
     checkAuthStatus: () => Promise<boolean>;
     getUser: () => PuterUser | null;
   };
+
   fs: {
-    write: (
-      path: string,
-      data: string | File | Blob
-    ) => Promise<File | undefined>;
+    write: (path: string, data: string | File | Blob) => Promise<File | undefined>;
     read: (path: string) => Promise<Blob | undefined>;
     upload: (file: File[] | Blob[]) => Promise<FSItem | undefined>;
     delete: (path: string) => Promise<void>;
     readDir: (path: string) => Promise<FSItem[] | undefined>;
   };
+
   ai: {
     chat: (
       prompt: string | ChatMessage[],
@@ -72,23 +66,21 @@ interface PuterStore {
       testMode?: boolean,
       options?: PuterChatOptions
     ) => Promise<AIResponse | undefined>;
-    feedback: (
-      path: string,
-      message: string
-    ) => Promise<AIResponse | undefined>;
-    img2txt: (
-      image: string | File | Blob,
-      testMode?: boolean
-    ) => Promise<string | undefined>;
+
+    /**
+     * Generates ATS feedback using Puter AI if available.
+     * Falls back to Ollama (local LLM) if Puter fails or has no credits.
+     */
+    feedback: (path: string, message: string) => Promise<AIResponse | undefined>;
+
+    img2txt: (image: string | File | Blob, testMode?: boolean) => Promise<string | undefined>;
   };
+
   kv: {
     get: (key: string) => Promise<string | null | undefined>;
     set: (key: string, value: string) => Promise<boolean | undefined>;
     delete: (key: string) => Promise<boolean | undefined>;
-    list: (
-      pattern: string,
-      returnValues?: boolean
-    ) => Promise<string[] | KVItem[] | undefined>;
+    list: (pattern: string, returnValues?: boolean) => Promise<string[] | KVItem[] | undefined>;
     flush: () => Promise<boolean | undefined>;
   };
 
@@ -98,6 +90,112 @@ interface PuterStore {
 
 const getPuter = (): typeof window.puter | null =>
   typeof window !== "undefined" && window.puter ? window.puter : null;
+
+/**
+ * ===== Ollama Local AI settings =====
+ * Change the model to what you actually pulled, e.g.:
+ *  - "llama3.2:3b"
+ *  - "qwen2.5:3b"
+ *  - "llama3.1:8b" (big)
+ */
+const OLLAMA_URL = "http://localhost:11434/api/generate";
+const OLLAMA_MODEL = "llama3.2:3b";
+
+/**
+ * Converts a Blob (PDF) to base64 string (for optional OCR / future use).
+ * Not required for current feedback flow, but useful if you want to extract text locally later.
+ */
+async function blobToTextSafe(blob: Blob): Promise<string> {
+  try {
+    return await blob.text();
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Normalize Ollama output into your app's expected AIResponse-like shape.
+ * Your UI expects overallScore + categories with tips.
+ */
+function toAIResponseFromJSON(parsed: any): AIResponse {
+  // Try to map to the shape your UI expects
+  // If your AIResponse differs, adjust here once and the rest of the app stays stable.
+  return {
+    id: crypto.randomUUID(),
+    overallScore: parsed?.overallScore ?? parsed?.overall_score ?? 70,
+    content: parsed?.content ?? { score: parsed?.contentScore ?? 70, tips: parsed?.contentTips ?? [] },
+    skills: parsed?.skills ?? { score: 70, tips: parsed?.skillsTips ?? [], missing: parsed?.skillsMissing ?? [] },
+    structure: parsed?.structure ?? { score: 70, tips: parsed?.structureTips ?? [] },
+    toneAndStyle: parsed?.toneAndStyle ?? parsed?.tone_and_style ?? { score: 70, tips: parsed?.toneTips ?? [] },
+    tips: parsed?.tips ?? [],
+    // Keep any extra fields
+    ...(parsed ?? {}),
+  } as AIResponse;
+}
+
+/**
+ * Calls Ollama locally with a strict "JSON only" prompt.
+ * If JSON parsing fails, we return a safe fallback response.
+ */
+async function ollamaFeedback(prompt: string): Promise<AIResponse> {
+  const strictPrompt = `
+You are an ATS resume analyzer.
+
+Return ONLY valid JSON. No markdown. No explanations outside JSON.
+
+Required JSON schema:
+{
+  "overallScore": number,
+  "content": { "score": number, "tips": Array<{ "type": "good"|"improve", "tip": string, "explanation"?: string }> },
+  "skills": { "score": number, "tips": Array<{ "type": "good"|"improve", "tip": string, "explanation"?: string }> },
+  "structure": { "score": number, "tips": Array<{ "type": "good"|"improve", "tip": string, "explanation"?: string }> },
+  "toneAndStyle": { "score": number, "tips": Array<{ "type": "good"|"improve", "tip": string, "explanation"?: string }> },
+  "tips": Array<{ "type": "good"|"improve", "tip": string, "explanation"?: string }>
+}
+
+Analyze based on the following input:
+${prompt}
+`.trim();
+
+  const res = await fetch(OLLAMA_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      model: OLLAMA_MODEL,
+      prompt: strictPrompt,
+      stream: false,
+      options: {
+        temperature: 0.2,
+      },
+    }),
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`Ollama request failed (${res.status}): ${txt}`);
+  }
+
+  const data = (await res.json()) as { response?: string };
+
+  const raw = data?.response ?? "";
+  try {
+    // Some models may add whitespace/newlines — trim is fine
+    const parsed = JSON.parse(raw.trim());
+    return toAIResponseFromJSON(parsed);
+  } catch {
+    // Fallback if model didn't return valid JSON
+    return toAIResponseFromJSON({
+      overallScore: 65,
+      tips: [
+        { type: "improve", tip: "AI returned non-JSON output. Try a different model or simplify the input." },
+      ],
+      content: { score: 65, tips: [{ type: "improve", tip: "Add more role-specific keywords and measurable achievements." }] },
+      skills: { score: 60, tips: [{ type: "improve", tip: "List key tools/skills explicitly to improve ATS matching." }] },
+      structure: { score: 70, tips: [{ type: "good", tip: "Structure looks mostly clear; ensure consistent headings and spacing." }] },
+      toneAndStyle: { score: 65, tips: [{ type: "improve", tip: "Use stronger action verbs and quantify results." }] },
+    });
+  }
+}
 
 export const usePuterStore = create<PuterStore>((set, get) => {
   const setError = (msg: string) => {
@@ -158,8 +256,7 @@ export const usePuterStore = create<PuterStore>((set, get) => {
         return false;
       }
     } catch (err) {
-      const msg =
-        err instanceof Error ? err.message : "Failed to check auth status";
+      const msg = err instanceof Error ? err.message : "Failed to check auth status";
       setError(msg);
       return false;
     }
@@ -321,37 +418,66 @@ export const usePuterStore = create<PuterStore>((set, get) => {
       setError("Puter.js not available");
       return;
     }
-    // return puter.ai.chat(prompt, imageURL, testMode, options);
-    return puter.ai.chat(prompt, imageURL, testMode, options) as Promise<
-      AIResponse | undefined
-    >;
+    return puter.ai.chat(prompt, imageURL, testMode, options) as Promise<AIResponse | undefined>;
   };
 
+  /**
+   * ===== Updated feedback() =====
+   * 1) Try Puter AI (if you have credits)
+   * 2) If it errors, fallback to local Ollama
+   */
   const feedback = async (path: string, message: string) => {
     const puter = getPuter();
+
+    // If Puter isn't available at all, go straight to Ollama
     if (!puter) {
-      setError("Puter.js not available");
-      return;
+      // We don't have resume text here yet; message likely contains jobDesc + instructions
+      // We'll try to also read the file content if possible.
+      // If read fails, Ollama still responds based on message alone.
+      try {
+        // Optional: attempt to read PDF blob and include minimal info
+        const blob = await readFile(path);
+        const fileText = blob ? await blobToTextSafe(blob) : "";
+        const combined = `${message}\n\n(Resume file path: ${path})\n(Resume raw text if extractable: ${fileText.slice(
+          0,
+          6000
+        )})`;
+        return await ollamaFeedback(combined);
+      } catch (e) {
+        return await ollamaFeedback(message);
+      }
     }
 
-    return puter.ai.chat(
-      [
-        {
-          role: "user",
-          content: [
-            {
-              type: "file",
-              puter_path: path,
-            },
-            {
-              type: "text",
-              text: message,
-            },
-          ],
-        },
-      ],
-      { model: "claude-sonnet-4" }
-    ) as Promise<AIResponse | undefined>;
+    // Try Puter first
+    try {
+      return (await puter.ai.chat(
+        [
+          {
+            role: "user",
+            content: [
+              { type: "file", puter_path: path },
+              { type: "text", text: message },
+            ],
+          },
+        ],
+        { model: "claude-3-7-sonnet" as any }
+      )) as AIResponse | undefined;
+    } catch (err) {
+      // Fallback to Ollama if Puter fails (credits, rate limit, etc.)
+      try {
+        const blob = await readFile(path);
+        const fileText = blob ? await blobToTextSafe(blob) : "";
+        const combined = `${message}\n\n(Resume file path: ${path})\n(Resume raw text if extractable: ${fileText.slice(
+          0,
+          6000
+        )})`;
+        const local = await ollamaFeedback(combined);
+        return local;
+      } catch {
+        const local = await ollamaFeedback(message);
+        return local;
+      }
+    }
   };
 
   const img2txt = async (image: string | File | Blob, testMode?: boolean) => {
@@ -396,10 +522,7 @@ export const usePuterStore = create<PuterStore>((set, get) => {
       setError("Puter.js not available");
       return;
     }
-    if (returnValues === undefined) {
-      returnValues = false;
-    }
-    return puter.kv.list(pattern, returnValues);
+    return puter.kv.list(pattern, returnValues ?? false);
   };
 
   const flushKV = async () => {
@@ -415,6 +538,7 @@ export const usePuterStore = create<PuterStore>((set, get) => {
     isLoading: true,
     error: null,
     puterReady: false,
+
     auth: {
       user: null,
       isAuthenticated: false,
@@ -424,6 +548,7 @@ export const usePuterStore = create<PuterStore>((set, get) => {
       checkAuthStatus,
       getUser: () => get().auth.user,
     },
+
     fs: {
       write: (path: string, data: string | File | Blob) => write(path, data),
       read: (path: string) => readFile(path),
@@ -431,25 +556,21 @@ export const usePuterStore = create<PuterStore>((set, get) => {
       upload: (files: File[] | Blob[]) => upload(files),
       delete: (path: string) => deleteFile(path),
     },
+
     ai: {
-      chat: (
-        prompt: string | ChatMessage[],
-        imageURL?: string | PuterChatOptions,
-        testMode?: boolean,
-        options?: PuterChatOptions
-      ) => chat(prompt, imageURL, testMode, options),
+      chat: (prompt, imageURL, testMode, options) => chat(prompt, imageURL, testMode, options),
       feedback: (path: string, message: string) => feedback(path, message),
-      img2txt: (image: string | File | Blob, testMode?: boolean) =>
-        img2txt(image, testMode),
+      img2txt: (image: string | File | Blob, testMode?: boolean) => img2txt(image, testMode),
     },
+
     kv: {
       get: (key: string) => getKV(key),
       set: (key: string, value: string) => setKV(key, value),
       delete: (key: string) => deleteKV(key),
-      list: (pattern: string, returnValues?: boolean) =>
-        listKV(pattern, returnValues),
+      list: (pattern: string, returnValues?: boolean) => listKV(pattern, returnValues),
       flush: () => flushKV(),
     },
+
     init,
     clearError: () => set({ error: null }),
   };
