@@ -78,7 +78,8 @@ Make sure to deploy the output of `npm run build`
 │   └── server/    # Server-side code
 ```
 ## 🎥 Demo Video
-[Watch demo]([https://youtu.be/YOUR_ID](https://youtu.be/IgumLIvc6LA))
+[Watch demo](https://www.youtube.com/watch?v=IgumLIvc6LA)
+
 
 ## Styling
 
