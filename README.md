@@ -77,8 +77,8 @@ Make sure to deploy the output of `npm run build`
 │   ├── client/    # Static assets
 │   └── server/    # Server-side code
 ```
-## 🎥 Demo Video
-[Watch demo](https://www.youtube.com/watch?v=IgumLIvc6LA)
+## Demo
+![App Demo](https://github.com/Kelvin-7-art/FUTURE_ML_03/blob/main/public/icons/Recording%202026-02-07%20171542.gif)
 
 
 ## Styling
